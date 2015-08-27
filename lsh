@@ -239,16 +239,16 @@ function shell.run(...)
 	end
 
 	if LyqydOS and process then
-		win = process.getWindow()
+		win = process.getWindow and process.getWindow()
 		if win and win.setCaption then
 			oldCaption = win.caption
-			win:setCaption(fs.getName(resolvedCommand))
+			win:setCaption(fs.getName(programs[1].program))
 		end
 		local proc = process.this()
 		oldPath = proc.path
 		oldName = proc.name
-		proc.path = resolvedCommand
-		proc.name = fs.getName(resolvedCommand)
+		proc.path = programs[1].program
+		proc.name = fs.getName(programs[1].program)
 	end
 
 	local result = true
