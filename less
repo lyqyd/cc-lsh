@@ -1,0 +1,67 @@
+local buffer = {}
+
+for line in io.lines() do
+	table.insert(buffer, line)
+end
+
+local offset = 1
+
+local x, y = term.getSize()
+
+local function draw()
+	for i = 1, y do
+		term.setCursorPos(1, i)
+		term.clearLine()
+		term.write(buffer[offset + i - 1])
+	end
+end
+
+if #buffer < y then
+	local xc, yc = term.getCursorPos()
+	if yc == y then term.scroll(1) end
+	yc = math.min(yc + 1, y)
+	term.setCursorPos(1, yc)
+	for i = 1, #buffer do
+		term.write(buffer[i])
+		if yc == y then term.scroll(1) end
+		yc = math.min(yc + 1, y)
+		term.setCursorPos(1, yc)
+	end
+	return
+end
+
+draw()
+while true do
+	local event = {os.pullEvent()}
+	if event[1] == "key" then
+		if event[2] == keys.up and offset > 1 then
+			offset = offset - 1
+			term.scroll(-1)
+			term.setCursorPos(1, 1)
+			term.clearLine()
+			term.write(buffer[offset])
+		elseif (event[2] == keys.down or event[2] == keys.enter) and offset <= #buffer - y then
+			offset = offset + 1
+			term.scroll(1)
+			term.setCursorPos(1, y)
+			term.clearLine()
+			term.write(buffer[offset + y - 1])
+		elseif event[2] == keys.pageUp then
+			offset = math.max(offset - y + 1, 1)
+			draw()
+		elseif event[2] == keys.pageDown or event[2] == keys.space then
+			offset = math.min(offset + y - 1, #buffer - y - 1)
+			draw()
+		end
+	elseif event[1] == "char" then
+		if event[2] == "q" then
+			term.scroll(1)
+			term.setCursorPos(1, y)
+			return
+		end
+	elseif event[1] == "term_resize" then
+		x, y = term.getSize()
+		offset = math.max(math.min(offset, #buffer - y - 1), 1)
+		draw()
+	end
+end

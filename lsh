@@ -1,0 +1,660 @@
+local args = {...}
+
+local runHistory = {}
+if fs.exists("/LyqydOS/.lyqshellhistory") then
+	local histFile=io.open("/LyqydOS/.lyqshellhistory","r")
+	if histFile then
+		for line in histFile:lines() do
+			table.insert(runHistory, line)
+		end
+		histFile:close()
+	end
+end
+local sizeOfHistory = #runHistory
+
+local parentShell = shell
+local exit = false
+local dir = parentShell and parentShell.dir() or ""
+local path = parentShell and parentShell.path() or ".:/rom/programs"
+local aliases = parentShell and parentShell.aliases() or {}
+local tCompletionInfo = (parentShell and parentShell.getCompletionInfo and parentShell.getCompletionInfo()) or {}
+local programStack = {}
+local pipedPrograms, currentProgram = nil, nil
+
+local shell = {}
+local env = {
+	shell = shell,
+}
+
+local stdin = {
+	bFileHandle = false,
+	bClosed = false,
+	close = function(self) end,
+	read = function(self, format)
+		if format and format ~= "*l" then
+			error("Unsupported format")
+		end
+		return _G.read()
+	end,
+	lines = function(self)
+		return function()
+			return _G.read()
+		end
+	end,
+}
+
+local stdout = {
+	bFileHandle = false,
+	bClosed = false,
+	close = function(self) end,
+	write = function(self, text)
+		_G.write(text)
+	end,
+	flush = function(self) end,
+}
+
+local function newPipe(progs, num)
+	local pipe = {
+		bFileHandle = true,
+		bClosed = false,
+		bufferLines = {},
+		buffer = "",
+		write = function(self, text)
+			self.buffer = self.buffer..text
+			local announce = false
+			local line
+			line, self.buffer = string.match(self.buffer, "^(.+)\n(.*)")
+			while line do
+				announce = true
+				table.insert(self.bufferLines, line)
+				line, self.buffer = string.match(self.buffer, "^(.+)\n(.*)")
+			end
+			if not self.buffer then self.buffer = "" end
+			if announce then
+				os.queueEvent("pipe_write")
+			end
+		end,
+		read = function(self, mode)
+			if mode and mode ~= "*l" then
+				error("Unsupported format")
+			end
+			if #self.bufferLines == 0 then
+				os.pullEvent("pipe_write")
+			end
+			return table.remove(self.bufferLines, 1)
+		end,
+		lines = function(self)
+			return function()
+				return self:read()
+			end
+		end,
+		close = function(self) end,
+		flush = function(self) end,
+	}
+	progs[num].output = pipe
+	return pipe
+end
+
+local function newInputRedirect(file)
+	return io.open(file, "r")
+end
+
+local function newOutputRedirect(file, mode)
+	if mode == ">" then
+		return io.open(file, "w")
+	elseif mode == ">>" then
+		return io.open(file, "a")
+	end
+end
+
+local function splitByQuotes(commandString)
+	local quoteCharacters = {
+		['"'] = true,
+		["'"] = true,
+	}
+	local escapedCharacters = {
+		a = "\a",
+		b = "\b",
+		f = "\f",
+		n = "\n",
+		r = "\r",
+		t = "\t",
+		v = "\v",
+		['"'] = "\"",
+		["'"] = "\'",
+		["["] = "\[",
+		["]"] = "\]",
+	}
+	local pipecharacters = {
+		["|"] = true,
+		[">"] = true,
+		["<"] = true,
+	}
+	local separators = {
+		[" "] = true,
+		["\t"] = true,
+		["|"] = true,
+		[">"] = true,
+		["<"] = true,
+	}
+	local sepString = ""
+	for k, v in pairs(separators) do
+		sepString = sepString..k
+	end
+
+	local escaped = false
+	local outputTable = {{""}}
+	local cIndex = 1
+	local inQuote = false
+	for i = 1, #commandString do
+		local char = string.sub(commandString, i, i)
+		if char == "\\" then
+			if escaped then
+				escaped = false
+				outputTable[cIndex][#outputTable[cIndex]] = outputTable[cIndex][#outputTable[cIndex]].."\\"
+			else
+				escaped = true
+			end
+		else
+			if escaped then
+				if escapedCharacters[char] then
+					outputTable[cIndex][#outputTable[cIndex]] = outputTable[cIndex][#outputTable[cIndex]]..escapedCharacters[char]
+				elseif separators[char] then
+					outputTable[cIndex][#outputTable[cIndex]] = outputTable[cIndex][#outputTable[cIndex]]..separators[char]
+				end
+				escaped = false
+			else
+				if quoteCharacters[char] then
+					if inQuote == char then
+						--finish quote, do not add charater to table.
+						inQuote = false
+					elseif inQuote then
+						--handle in a quote, but not started with this quote character.
+						outputTable[cIndex][#outputTable[cIndex]] = outputTable[cIndex][#outputTable[cIndex]]..char
+					else
+						inQuote = char
+					end
+				else
+					if separators[char] then
+						if inQuote then
+							outputTable[cIndex][#outputTable[cIndex]] = outputTable[cIndex][#outputTable[cIndex]]..char
+						elseif pipecharacters[char] then
+							if string.match(outputTable[cIndex][#outputTable[cIndex]], "^%s*$") then
+								outputTable[cIndex][#outputTable[cIndex]] = nil
+							end
+							if cIndex > 1 and #outputTable[cIndex] == 0 and outputTable[cIndex].separator == ">" and char == ">" then
+								char = ">>"
+							else
+								cIndex = cIndex + 1
+							end
+							outputTable[cIndex] = {"", separator = char}
+						else
+							if #outputTable[cIndex][#outputTable[cIndex]] > 1 then
+								outputTable[cIndex][#outputTable[cIndex] + 1] = ""
+							end
+						end
+					else
+						outputTable[cIndex][#outputTable[cIndex]] = outputTable[cIndex][#outputTable[cIndex]]..char
+					end
+				end
+			end
+		end
+	end
+	return outputTable
+end
+
+function shell.expand(globString)
+	--
+end
+
+local function resumePiped(program, event)
+	io.input(program.input)
+	io.output(program.output)
+	local passback = {coroutine.resume(program.thread, unpack(event))}
+	io.output(nil)
+	io.input(nil)
+	if coroutine.status(program.thread) == "dead" then
+		program.thread = false
+		program.input:close()
+		program.output:close()
+		return passback[1]
+	else
+		program.filter = passback[2]
+	end
+end
+	
+
+function shell.run(...)
+	local fullCommand = table.concat({...}, " ")
+	local command = splitByQuotes(fullCommand)
+	local programs = {{program = shell.resolveProgram(command[1][1]), arguments = {unpack(command[1], 2)}, input = stdin, output = stdout, stack = {command[1][1]}}}
+	for i = 2, #command do
+		if command[i].separator == "|" then
+			programs[#programs + 1] = {program = shell.resolveProgram(command[i][1]), arguments = {unpack(command[i], 2)}, input = newPipe(programs, #programs), output = stdout, stack = {command[i][1]}}
+		elseif command[i].separator == "<" then
+			programs[#programs].input = newInputRedirect(shell.resolve(command[i][1]))
+		else
+			programs[#programs].output = newOutputRedirect(shell.resolve(command[i][1]), command[i].separator)
+		end
+	end
+
+	if LyqydOS and process then
+		win = process.getWindow()
+		if win and win.setCaption then
+			oldCaption = win.caption
+			win:setCaption(fs.getName(resolvedCommand))
+		end
+		local proc = process.this()
+		oldPath = proc.path
+		oldName = proc.name
+		proc.path = resolvedCommand
+		proc.name = fs.getName(resolvedCommand)
+	end
+
+	local result = true
+	pipedPrograms = programs
+
+	local running = #programs
+	for i = 1, #programs do
+		programs[i].thread = coroutine.create(function() return os.run(env, programs[i].program, unpack(programs[i].arguments)) end)
+		currentProgram = i
+		local ret = resumePiped(programs[i], {})
+		currentProgram = nil
+		if not programs[i].thread then
+			running = running - 1
+			if running == 0 then running = false end
+			if i == 1 then result = ret end
+		end
+	end
+
+	while running do
+		local event = {os.pullEventRaw()}
+		for i = 1, #programs do
+			if programs[i].thread and (not programs[i].filter or (programs[i].filter and programs[i].filter == event[1] or event[1] == "terminate")) then
+				if programs[i].filter ~= "pipe_write" or #programs[i].input.bufferLines >= 1 or programs[i - 1].thread == false then
+					currentProgram = i
+					local ret = resumePiped(programs[i], event)
+					currentProgram = nil
+					if not programs[i].thread then
+						running = running - 1
+						if running == 0 then running = false end
+						if i == 1 then result = ret end
+					end
+				end
+			end
+		end
+	end
+
+	if win and oldCaption then
+		win:setCaption(oldCaption)
+	end
+	if LyqydOS and process then
+		local proc = process.this()
+		proc.path = oldPath
+		proc.name = oldName
+	end
+
+	return result
+end
+
+function shell.exit()
+	exit = true
+end
+
+function shell.dir()
+	return dir
+end
+
+function shell.setDir(_dir)
+	dir = _dir
+end
+
+function shell.path()
+	return path
+end
+
+function shell.setPath(_path)
+	path = _path
+end
+
+function shell.resolve(_path)
+	local startChar = string.sub(_path, 1, 1)
+	if startChar == "\\" or startChar == "/" then
+		return fs.combine("", _path)
+	else
+		return fs.combine(dir, _path)
+	end
+end
+
+function shell.resolveProgram(_path)
+	if aliases[_path] then
+		_path = aliases[_path]
+	end
+
+	local startChar = string.sub(_path, 1, 1)
+	if startChar == "\\" or startChar == "/" then
+		local commandPath = fs.combine("", _path)
+		if fs.exists(commandPath) and not fs.isDir(commandPath) then
+			return commandPath
+		end
+		return nil
+	end
+
+	for commandDir in string.gmatch(path, "[^:]+") do
+		commandPath = fs.combine(shell.resolve(commandDir), _path)
+		if fs.exists(commandPath) and not fs.isDir(commandPath) then
+			return commandPath
+		end
+	end
+
+	return nil
+end
+
+function shell.programs(all)
+	local items = {}
+	
+    for _path in string.gmatch(path, "[^:]+") do
+    	_path = shell.resolve(_path)
+		if fs.isDir(_path) then
+			local list = fs.list(_path)
+			for n, file in pairs(list) do
+				if not fs.isDir(fs.combine(_path, file)) and (all or string.sub(file, 1, 1) ~= ".") then
+					items[sFile] = true
+				end
+			end
+		end
+    end	
+
+	local itemList = {}
+	for item in pairs(items) do
+		table.insert(itemList, item)
+	end
+	table.sort(itemList)
+	return itemList
+end
+
+local function completeProgram(line)
+	if string.sub(line, 1, 1) == "/" then
+	    -- Add programs from the root
+	    return fs.complete(line, "", true, false)
+
+    else
+        local tResults = {}
+        local tSeen = {}
+
+        -- Add aliases
+        for sAlias, sCommand in pairs(tAliases) do
+            if #sAlias > #line and string.sub(sAlias, 1, #line) == line then
+                local sResult = string.sub(sAlias, #line + 1)
+                if not tSeen[sResult] then
+                    table.insert(tResults, sResult)
+                    tSeen[sResult] = true
+                end
+            end
+        end
+
+        -- Add programs from the path
+        local programs = shell.programs()
+        for n=1,#programs do
+            local program = programs[n]
+            if #program > #line and string.sub(program, 1, #line) == line then
+                local sResult = string.sub(program, #line + 1)
+                if not tSeen[sResult] then
+                    table.insert(tResults, sResult)
+                    tSeen[sResult] = true
+                end
+            end
+        end
+
+        -- Sort and return
+        table.sort(tResults)
+        return tResults
+    end
+end
+
+local function completeProgramArgument(program, nArgument, line)
+    local tInfo = tCompletionInfo[program]
+    if tInfo then
+        return tInfo.fnComplete(shell, nArgument, line)
+    end
+    return nil
+end
+
+function shell.complete(line)
+    if #line > 0 then
+        local tWords = tokenise(line)
+        local nIndex = #tWords
+        if string.sub(line, #line, #line) == " " then
+            nIndex = nIndex + 1
+        end
+        if nIndex == 1 then
+            local sBit = tWords[1] or ""
+            local sPath = shell.resolveProgram(sBit)
+            if tCompletionInfo[sPath] then
+                return {" "}
+            else
+                local tResults = completeProgram(sBit)
+                for n=1,#tResults do
+                    local sResult = tResults[n]
+                    local sPath = shell.resolveProgram(sBit .. sResult)
+                    if tCompletionInfo[sPath] then
+                        tResults[n] = sResult .. " "
+                    end
+                end
+                return tResults
+            end
+
+        elseif nIndex > 1 then
+            local sPath = shell.resolveProgram(tWords[1])
+            return completeProgramArgument(sPath , nIndex - 1, tWords[nIndex] or "")
+
+        end
+    end
+	return nil
+end
+
+function shell.completeProgram(program)
+    return completeProgram(program)
+end
+
+function shell.setCompletionFunction(program, fnComplete)
+    tCompletionInfo[program] = {
+        fnComplete = fnComplete
+   }
+end
+
+function shell.getCompletionInfo()
+    return tCompletionInfo
+end
+
+function shell.getRunningProgram()
+	if pipedPrograms and currentProgram then
+		return pipedPrograms[currentProgram].stack[#pipedPrograms[currentProgram].stack]
+	elseif #programStack > 0 then
+		return programStack[#programStack]
+	end
+	return nil
+end
+
+function shell.setAlias(_path, _alias)
+	aliases[_path] = _alias
+end
+
+function shell.clearAlias(_path)
+	shell.setAlias(_path, nil)
+end
+
+function shell.aliases()
+	local copy = {}
+	for path, alias in pairs(aliases) do
+		copy[path] = alias
+	end
+	return copy
+end
+
+local function saveHistory()
+	if #runHistory > sizeOfHistory then
+		local histFile = io.open("/LyqydOS/.lyqshellhistory", "a")
+		if histFile then
+			for i = sizeOfHistory + 1, #runHistory do
+				histFile:write(runHistory[i].."\n")
+			end
+			histFile:close()
+		end
+	end
+end
+
+local function customRead(history)
+	term.setCursorBlink(true)
+
+    local line = ""
+	local nHistoryPos = nil
+	local nPos = 0
+	
+	local w, h = term.getSize()
+	local sx, sy = term.getCursorPos()	
+	
+	local function redraw()
+		local nScroll = 0
+		if sx + nPos >= w then
+			nScroll = (sx + nPos) - w
+		end
+			
+		term.setCursorPos(sx, sy)
+		term.write(string.sub(line, nScroll + 1))
+		term.write(string.rep(" ", w - (#line - nScroll) - sx))
+		term.setCursorPos(sx + nPos - nScroll, sy)
+	end
+	
+	while true do
+		local sEvent, param = os.pullEvent()
+		if sEvent == "char" then
+			line = string.sub(line, 1, nPos)..param..string.sub(line, nPos + 1)
+			nPos = nPos + 1
+			redraw()
+			
+		elseif sEvent == "key" then
+		    if param == keys.enter then
+				-- Enter
+				break
+				
+			elseif param == keys.left then
+				-- Left
+				if nPos > 0 then
+					nPos = nPos - 1
+					redraw()
+				end
+				
+			elseif param == keys.right then
+				-- Right				
+				if nPos < string.len(line) then
+					nPos = nPos + 1
+					redraw()
+				end
+			
+			elseif param == keys.up or param == keys.down then
+                -- Up or down
+				if history then
+					if param == keys.up then
+						-- Up
+						if nHistoryPos == nil then
+							if #history > 0 then
+								nHistoryPos = #history
+							end
+						elseif nHistoryPos > 1 then
+							nHistoryPos = nHistoryPos - 1
+						end
+					else
+						-- Down
+						if nHistoryPos == #history then
+							nHistoryPos = nil
+						elseif nHistoryPos ~= nil then
+							nHistoryPos = nHistoryPos + 1
+						end
+					end
+					
+					if nHistoryPos then
+                    	line = history[nHistoryPos]
+                    	nPos = string.len(line) 
+                    else
+						line = ""
+						nPos = 0
+					end
+					redraw()
+                end
+			elseif param == keys.backspace then
+				-- Backspace
+				if nPos > 0 then
+					line = string.sub(line, 1, nPos - 1) .. string.sub(line, nPos + 1)
+					nPos = nPos - 1
+					redraw()
+				end
+			elseif param == keys.home then
+				-- Home
+				nPos = 0
+				redraw()
+			elseif param == keys.delete then
+				if nPos < string.len(line) then
+					line = string.sub(line, 1, nPos) .. string.sub(line, nPos + 2)				
+					redraw()
+				end
+			elseif param == keys["end"] then
+				-- End
+				nPos = string.len(line)
+				redraw()
+			elseif param == keys.tab then
+				--tab autocomplete.
+				
+			end
+		end
+	end
+	
+	term.setCursorBlink(false)
+	term.setCursorPos(w + 1, sy)
+	print()
+	
+	return line
+end
+
+if parentShell == nil then
+	--handle startup scripts
+	local romStartup = shell.resolveProgram("/rom/startup")
+	if romStartup then
+		shell.run(romStartup)
+	end
+	
+	local userStartup = shell.resolveProgram("/startup")
+	for n, side in pairs(peripheral.getNames()) do
+		if disk.isPresent(side) and disk.hasData(side) then
+			local diskStartup = shell.resolveProgram(fs.combine(disk.getMountPath(side), "startup"))
+			if diskStartup then
+				userStartup = diskStartup
+				break
+			end
+		end
+	end
+	
+	if userStartup then
+		shell.run(userStartup)
+	end
+end
+
+term.clear()
+term.setCursorPos(1, 1)
+
+if #args > 0 then
+	return shell.run(unpack(args))
+end
+
+print("Lyqyd Shell")
+
+while true do
+	write(shell.dir().."> ")
+	local command = customRead(runHistory)
+	if command == "exit" then
+		saveHistory()
+		return
+	end
+	table.insert(runHistory, command)
+	shell.run(command)
+end

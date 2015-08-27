@@ -1,0 +1,15 @@
+local args = { ... }
+
+if #args < 1 then
+	return
+end
+
+file = shell.resolve(args[1])
+
+local handle = io.open(file, "r")
+if handle then
+	for line in handle:lines() do
+		io.write(line.."\n")
+	end
+	handle:close()
+end

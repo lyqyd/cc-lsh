@@ -1,0 +1,11 @@
+local args = {...}
+
+if #args < 1 then
+	return
+end
+
+for line in io.lines() do
+	if string.match(line, args[1]) then
+		io.write(line.."\n")
+	end
+end
