@@ -239,12 +239,9 @@ local function resumePiped(program, event)
 	end
 end
 
-_G.splits = {}
-
 function shell.run(...)
 	local fullCommand = table.concat({...}, " ")
 	local command = splitByQuotes(fullCommand)
-	_G.splits[#_G.splits + 1] = command
 	local setIndex = 1
 	local programs = {{{program = shell.resolveProgram(command[1][1]), arguments = {unpack(command[1], 2)}, input = stdin, output = stdout, stack = {command[1][1]}}}}
 	for i = 2, #command do
@@ -271,7 +268,7 @@ function shell.run(...)
 
 	local result
 	for i = 1, #programs do
-		if i > 1 and programs[i].condition ~= nil and programs[i].condition ~= result then
+		if (i > 1 and programs[i].condition ~= nil and programs[i].condition ~= result) or not programs[i][1].program then
 			break
 		end
 
