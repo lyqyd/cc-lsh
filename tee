@@ -1,0 +1,20 @@
+local args = {...}
+
+local tee
+
+if #args < 1 then
+	return
+else
+	if #args == 1 then
+		tee = io.open(shell.resolve(args[1]), "w")
+	elseif #args == 2 and args[1] == "-a" then
+		tee = io.open(shell.resolve(args[2]), "a")
+	end
+end
+
+for line in io.lines() do
+	if tee then tee:write(line.."\n") end
+	io.write(line.."\n")
+end
+
+tee:close()
