@@ -34,8 +34,8 @@ if output.bFileHandle then
 	end
 else
 	if term.isColour() then
-		tabulateCommon( colors.green, tDirs, colors.white, tFiles )
+		textutils.tabulate( colors.green, tDirs, colors.white, tFiles )
 	else
-		tabulateCommon( tDirs, tFiles )
+		textutils.tabulate( tDirs, tFiles )
 	end
 end
