@@ -24,6 +24,7 @@ local pipedPrograms, currentProgram = nil, nil
 local shell = {}
 local env = {
 	shell = shell,
+	multishell = multishell
 }
 
 local stdin = {
@@ -125,10 +126,12 @@ local function splitByQuotes(commandString)
 		["["] = "\[",
 		["]"] = "\]",
 	}
-	local pipecharacters = {
+	local actionseparators = {
 		["|"] = true,
 		[">"] = true,
 		["<"] = true,
+		["&"] = true,
+		[";"] = true,
 	}
 	local separators = {
 		[" "] = true,
@@ -136,6 +139,13 @@ local function splitByQuotes(commandString)
 		["|"] = true,
 		[">"] = true,
 		["<"] = true,
+		["&"] = true,
+		[";"] = true,
+	}
+	local doubles = {
+		[">"] = false,
+		["&"] = true,
+		["|"] = false,
 	}
 	local sepString = ""
 	for k, v in pairs(separators) do
@@ -160,7 +170,7 @@ local function splitByQuotes(commandString)
 				if escapedCharacters[char] then
 					outputTable[cIndex][#outputTable[cIndex]] = outputTable[cIndex][#outputTable[cIndex]]..escapedCharacters[char]
 				elseif separators[char] then
-					outputTable[cIndex][#outputTable[cIndex]] = outputTable[cIndex][#outputTable[cIndex]]..separators[char]
+					outputTable[cIndex][#outputTable[cIndex]] = outputTable[cIndex][#outputTable[cIndex]]..char
 				end
 				escaped = false
 			else
@@ -178,22 +188,28 @@ local function splitByQuotes(commandString)
 					if separators[char] then
 						if inQuote then
 							outputTable[cIndex][#outputTable[cIndex]] = outputTable[cIndex][#outputTable[cIndex]]..char
-						elseif pipecharacters[char] then
+						elseif doubles[char] ~= nil and cIndex > 1 and #outputTable[cIndex][1] == 0 and outputTable[cIndex].separator == char then
+							--the separator character was doubled, and that doubling is a distinct action.
+							outputTable[cIndex].separator = string.rep(char, 2)
+						elseif actionseparators[char] then
 							if string.match(outputTable[cIndex][#outputTable[cIndex]], "^%s*$") then
 								outputTable[cIndex][#outputTable[cIndex]] = nil
 							end
-							if cIndex > 1 and #outputTable[cIndex] == 0 and outputTable[cIndex].separator == ">" and char == ">" then
-								char = ">>"
-							else
-								cIndex = cIndex + 1
-							end
+							--move on to next command string.
+							cIndex = cIndex + 1
 							outputTable[cIndex] = {"", separator = char}
 						else
 							if #outputTable[cIndex][#outputTable[cIndex]] > 1 then
+								--encountered a non-pipe separator character, move on to next string in command.
 								outputTable[cIndex][#outputTable[cIndex] + 1] = ""
 							end
 						end
 					else
+						if #outputTable[cIndex] == 1 and cIndex > 1 and #outputTable[cIndex][1] == 0 and doubles[outputTable[cIndex].separator] and #outputTable[cIndex].separator == 1 then
+							--the separator was a doubling-required separator that was not doubled.
+							cIndex = cIndex - 1
+							outputTable[cIndex][#outputTable[cIndex] + 1] = ""
+						end
 						outputTable[cIndex][#outputTable[cIndex]] = outputTable[cIndex][#outputTable[cIndex]]..char
 					end
 				end
@@ -222,76 +238,98 @@ local function resumePiped(program, event)
 		program.filter = passback[2]
 	end
 end
-	
+
+_G.splits = {}
 
 function shell.run(...)
 	local fullCommand = table.concat({...}, " ")
 	local command = splitByQuotes(fullCommand)
-	local programs = {{program = shell.resolveProgram(command[1][1]), arguments = {unpack(command[1], 2)}, input = stdin, output = stdout, stack = {command[1][1]}}}
+	_G.splits[#_G.splits + 1] = command
+	local setIndex = 1
+	local programs = {{{program = shell.resolveProgram(command[1][1]), arguments = {unpack(command[1], 2)}, input = stdin, output = stdout, stack = {command[1][1]}}}}
 	for i = 2, #command do
-		if command[i].separator == "|" then
-			programs[#programs + 1] = {program = shell.resolveProgram(command[i][1]), arguments = {unpack(command[i], 2)}, input = newPipe(programs, #programs), output = stdout, stack = {command[i][1]}}
+		if command[i].separator == ";" then
+			--new set, unconditional
+			setIndex = setIndex + 1
+			programs[setIndex] = {condition = nil, {program = shell.resolveProgram(command[i][1]), arguments = {unpack(command[i], 2)}, input = stdin, output = stdout, stack = {command[i][1]}}}
+		elseif command[i].separator == "&&" then
+			--new set, only on success of previous
+			setIndex = setIndex + 1
+			programs[setIndex] = {condition = true, {program = shell.resolveProgram(command[i][1]), arguments = {unpack(command[i], 2)}, input = stdin, output = stdout, stack = {command[i][1]}}}
+		elseif command[i].separator == "||" then
+			--new set, only on failure of previous
+			setIndex = setIndex + 1
+			programs[setIndex] = {condition = false, {program = shell.resolveProgram(command[i][1]), arguments = {unpack(command[i], 2)}, input = stdin, output = stdout, stack = {command[i][1]}}}
+		elseif command[i].separator == "|" then
+			programs[setIndex][#programs[setIndex] + 1] = {program = shell.resolveProgram(command[i][1]), arguments = {unpack(command[i], 2)}, input = newPipe(programs[setIndex], #programs[setIndex]), output = stdout, stack = {command[i][1]}}
 		elseif command[i].separator == "<" then
-			programs[#programs].input = newInputRedirect(shell.resolve(command[i][1]))
+			programs[setIndex][#programs[setIndex]].input = newInputRedirect(shell.resolve(command[i][1]))
 		else
-			programs[#programs].output = newOutputRedirect(shell.resolve(command[i][1]), command[i].separator)
+			programs[setIndex][#programs[setIndex]].output = newOutputRedirect(shell.resolve(command[i][1]), command[i].separator)
 		end
 	end
 
-	if LyqydOS and process then
-		win = process.getWindow and process.getWindow()
-		if win and win.setCaption then
-			oldCaption = win.caption
-			win:setCaption(fs.getName(programs[1].program))
-		end
-		local proc = process.this()
-		oldPath = proc.path
-		oldName = proc.name
-		proc.path = programs[1].program
-		proc.name = fs.getName(programs[1].program)
-	end
-
-	local result = true
-	pipedPrograms = programs
-
-	local running = #programs
+	local result
 	for i = 1, #programs do
-		programs[i].thread = coroutine.create(function() return os.run(env, programs[i].program, unpack(programs[i].arguments)) end)
-		currentProgram = i
-		local ret = resumePiped(programs[i], {})
-		currentProgram = nil
-		if not programs[i].thread then
-			running = running - 1
-			if running == 0 then running = false end
-			if i == 1 then result = ret end
+		if i > 1 and programs[i].condition ~= nil and programs[i].condition ~= result then
+			break
 		end
-	end
 
-	while running do
-		local event = {os.pullEventRaw()}
-		for i = 1, #programs do
-			if programs[i].thread and (not programs[i].filter or (programs[i].filter and programs[i].filter == event[1] or event[1] == "terminate")) then
-				if programs[i].filter ~= "pipe_write" or #programs[i].input.bufferLines >= 1 or programs[i - 1].thread == false then
-					currentProgram = i
-					local ret = resumePiped(programs[i], event)
-					currentProgram = nil
-					if not programs[i].thread then
-						running = running - 1
-						if running == 0 then running = false end
-						if i == 1 then result = ret end
+		if LyqydOS and process then
+			win = process.getWindow and process.getWindow()
+			if win and win.setCaption then
+				oldCaption = win.caption
+				win:setCaption(fs.getName(programs[i][1].program))
+			end
+			local proc = process.this()
+			oldPath = proc.path
+			oldName = proc.name
+			proc.path = programs[i][1].program
+			proc.name = fs.getName(programs[i][1].program)
+		end
+
+		result = true
+		pipedPrograms = programs
+
+		local running = #programs[i]
+		for j = 1, #programs[i] do
+			programs[i][j].thread = coroutine.create(function() return os.run(env, programs[i][j].program, unpack(programs[i][j].arguments)) end)
+			currentProgram = j
+			local ret = resumePiped(programs[i][j], {})
+			currentProgram = nil
+			if not programs[i][j].thread then
+				running = running - 1
+				if running == 0 then running = false end
+				if j == 1 then result = ret end
+			end
+		end
+
+		while running do
+			local event = {os.pullEventRaw()}
+			for j = 1, #programs[i] do
+				if programs[i][j].thread and (not programs[i][j].filter or (programs[i][j].filter and programs[i][j].filter == event[1] or event[1] == "terminate")) then
+					if programs[i][j].filter ~= "pipe_write" or #programs[i][j].input.bufferLines >= 1 or programs[i][j - 1].thread == false then
+						currentProgram = j
+						local ret = resumePiped(programs[i][j], event)
+						currentProgram = nil
+						if not programs[i][j].thread then
+							running = running - 1
+							if running == 0 then running = false end
+							if j == 1 then result = ret end
+						end
 					end
 				end
 			end
 		end
-	end
 
-	if win and oldCaption then
-		win:setCaption(oldCaption)
-	end
-	if LyqydOS and process then
-		local proc = process.this()
-		proc.path = oldPath
-		proc.name = oldName
+		if win and oldCaption then
+			win:setCaption(oldCaption)
+		end
+		if LyqydOS and process then
+			local proc = process.this()
+			proc.path = oldPath
+			proc.name = oldName
+		end
 	end
 
 	return result
