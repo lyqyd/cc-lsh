@@ -296,65 +296,116 @@ function shell.run(...)
 	end
 
 	local result
-	for i = 1, #programs do
-		if (i > 1 and programs[i].condition ~= nil and programs[i].condition ~= result) or not programs[i][1].program then
-			break
-		end
-
-		if LyqydOS and process then
-			win = process.getWindow and process.getWindow()
-			if win and win.setCaption then
-				oldCaption = win.caption
-				win:setCaption(fs.getName(programs[i][1].program))
+	if LyqydOS and process then
+		local parent = process.this()
+		for i = 1, #programs do
+			if (i > 1 and programs[i].condition ~= nil and programs[i].condition ~= result) or not programs[i][1].program then
+				break
 			end
-			local proc = process.this()
-			oldPath = proc.path
-			oldName = proc.name
-			proc.path = programs[i][1].program
-			proc.name = fs.getName(programs[i][1].program)
-		end
 
-		result = true
-		pipedPrograms = programs
+			result = true
 
-		local running = #programs[i]
-		for j = 1, #programs[i] do
-			programs[i][j].thread = coroutine.create(function() return os.run(env, programs[i][j].program, unpack(programs[i][j].arguments)) end)
-			currentProgram = programs[i][j].id
-			local ret = resumePiped(programs[i][j], {})
-			currentProgram = 1
-			if not programs[i][j].thread then
-				running = running - 1
-				if running == 0 then running = false end
-				if j == 1 then result = ret end
-			end
-		end
-
-		while running do
-			local event = {os.pullEventRaw()}
+			local running = #programs[i]
 			for j = 1, #programs[i] do
-				if programs[i][j].thread and (not programs[i][j].filter or (programs[i][j].filter and programs[i][j].filter == event[1] or event[1] == "terminate")) then
-					if programs[i][j].filter ~= "pipe_write" or #programs[i][j].input.bufferLines >= 1 or programs[i][j - 1].thread == false then
-						currentProgram = programs[i][j].id
-						local ret = resumePiped(programs[i][j], event)
-						currentProgram = 1
-						if not programs[i][j].thread then
+				local program = programs[i][j]
+				local position = j
+				io.input(program.input)
+				io.output(program.output)
+				local proc = process.new(function() return os.run(env, program.program, unpack(program.arguments)) end, program.program, term.current())
+				io.output(nil)
+				io.input(nil)
+				if coroutine.status(proc.thread) ~= "dead" then
+					local pre, post = proc.pre, proc.post
+					proc:pre = function(...)
+						pre(proc, ...)
+						io.input(program.input)
+						io.output(program.output)
+					end
+					proc:post = function(...)
+						io.output(nil)
+						io.input(nil)
+						if coroutine.status(self.thread) == "dead" then
 							running = running - 1
-							if running == 0 then running = false end
-							if j == 1 then result = ret end
+							local passback = {...}
+							if position == 1 then parent:queue("lsh_finish", passback[1])
+							program.input:close()
+							program.output:close()
+						end
+						post(proc, ...)
+					end
+				else
+					running = running - 1
+					program.input:close()
+					program.output:close()
+				end
+			end
+
+			local event = os.pullEvent("lsh_finish")
+			result = event[2]
+		end
+
+		return result
+	else
+		for i = 1, #programs do
+			if (i > 1 and programs[i].condition ~= nil and programs[i].condition ~= result) or not programs[i][1].program then
+				break
+			end
+
+			if LyqydOS and process then
+				win = process.getWindow and process.getWindow()
+				if win and win.setCaption then
+					oldCaption = win.caption
+					win:setCaption(fs.getName(programs[i][1].program))
+				end
+				local proc = process.this()
+				oldPath = proc.path
+				oldName = proc.name
+				proc.path = programs[i][1].program
+				proc.name = fs.getName(programs[i][1].program)
+			end
+
+			result = true
+			pipedPrograms = programs
+
+			local running = #programs[i]
+			for j = 1, #programs[i] do
+				programs[i][j].thread = coroutine.create(function() return os.run(env, programs[i][j].program, unpack(programs[i][j].arguments)) end)
+				currentProgram = programs[i][j].id
+				local ret = resumePiped(programs[i][j], {})
+				currentProgram = 1
+				if not programs[i][j].thread then
+					running = running - 1
+					if running == 0 then running = false end
+					if j == 1 then result = ret end
+				end
+			end
+
+			while running do
+				local event = {os.pullEventRaw()}
+				for j = 1, #programs[i] do
+					if programs[i][j].thread and (not programs[i][j].filter or (programs[i][j].filter and programs[i][j].filter == event[1] or event[1] == "terminate")) then
+						if programs[i][j].filter ~= "pipe_write" or #programs[i][j].input.bufferLines >= 1 or programs[i][j - 1].thread == false then
+							currentProgram = programs[i][j].id
+							local ret = resumePiped(programs[i][j], event)
+							currentProgram = 1
+							if not programs[i][j].thread then
+								running = running - 1
+								if running == 0 then running = false end
+								if j == 1 then result = ret end
+							end
 						end
 					end
 				end
 			end
-		end
 
-		if win and oldCaption then
-			win:setCaption(oldCaption)
-		end
-		if LyqydOS and process then
-			local proc = process.this()
-			proc.path = oldPath
-			proc.name = oldName
+			if win and oldCaption then
+				win:setCaption(oldCaption)
+			end
+			if LyqydOS and process then
+				local proc = process.this()
+				proc.path = oldPath
+				proc.name = oldName
+			end
 		end
 	end
 
