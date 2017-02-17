@@ -51,6 +51,18 @@ local env = {
 	multishell = multishell
 }
 
+--table of player input generated events.
+local input_events = {
+	key = true,
+	key_up = true,
+	char = true,
+	mouse_click = true,
+	mouse_drag = true,
+	mouse_scroll = true,
+	mouse_up = true,
+	terminate = true,
+}
+
 local stdin = {
 	bFileHandle = false,
 	bClosed = false,
@@ -298,12 +310,21 @@ function shell.run(...)
 	local result
 	if LyqydOS and process then
 		local parent = process.this()
+		local oldCaption
+		local win = process.getWindow()
+		if win and win.setCaption then
+			oldCaption = win.caption
+			win:setCaption(fs.getName(programs[1][1].program))
+		end
+
 		for i = 1, #programs do
 			if (i > 1 and programs[i].condition ~= nil and programs[i].condition ~= result) or not programs[i][1].program then
 				break
 			end
 
 			result = true
+
+			local processes = {}
 
 			local running = #programs[i]
 			for j = 1, #programs[i] do
@@ -312,26 +333,27 @@ function shell.run(...)
 				io.input(program.input)
 				io.output(program.output)
 				local proc = process.new(function() return os.run(env, program.program, unpack(program.arguments)) end, program.program, term.current())
+				processes[j] = proc
 				io.output(nil)
 				io.input(nil)
 				if coroutine.status(proc.thread) ~= "dead" then
 					local pre, post = proc.pre, proc.post
-					proc:pre = function(...)
-						pre(proc, ...)
+					proc.pre = function(self, ...)
+						pre(self, ...)
 						io.input(program.input)
 						io.output(program.output)
 					end
-					proc:post = function(...)
+					proc.post = function(self, ...)
 						io.output(nil)
 						io.input(nil)
 						if coroutine.status(self.thread) == "dead" then
 							running = running - 1
 							local passback = {...}
-							if position == 1 then parent:queue("lsh_finish", passback[1])
+							if position == 1 then parent:queue("lsh_finish", passback[1]) end
 							program.input:close()
 							program.output:close()
 						end
-						post(proc, ...)
+						post(self, ...)
 					end
 				else
 					running = running - 1
@@ -340,8 +362,23 @@ function shell.run(...)
 				end
 			end
 
-			local event = os.pullEvent("lsh_finish")
+			while true do
+				local event = {os.pullEvent()}
+				if input_events[event[1]] then
+					for j = 1, #processes do
+						if coroutine.status(processes[j].thread) ~= "dead" then
+							processes[j]:resume(event)
+						end
+					end
+				elseif event[1] == "lsh_finish" then
+					break
+				end
+			end
 			result = event[2]
+		end
+
+		if oldCaption then
+			win:setCaption(oldCaption)
 		end
 
 		return result
