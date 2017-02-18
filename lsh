@@ -316,6 +316,7 @@ function shell.run(...)
 			oldCaption = win.caption
 			win:setCaption(fs.getName(programs[1][1].program))
 		end
+		local procTable = getmetatable(parent).__index
 
 		for i = 1, #programs do
 			if (i > 1 and programs[i].condition ~= nil and programs[i].condition ~= result) or not programs[i][1].program then
@@ -326,55 +327,66 @@ function shell.run(...)
 
 			local processes = {}
 
+			local oldKill = parent.kill
+			parent.kill = function(self)
+				for i = 1, #processes do
+					if process.list[processes[i]] then
+						process.list[processes[i]]:kill()
+					end
+				end
+				oldKill(parent)
+			end
+
 			local running = #programs[i]
 			for j = 1, #programs[i] do
 				local program = programs[i][j]
-				local position = j
-				io.input(program.input)
-				io.output(program.output)
-				local proc = process.new(function() return os.run(env, program.program, unpack(program.arguments)) end, program.program, term.current())
-				processes[j] = proc
-				io.output(nil)
-				io.input(nil)
-				if coroutine.status(proc.thread) ~= "dead" then
-					local pre, post = proc.pre, proc.post
-					proc.pre = function(self, ...)
+				local oldSetup = procTable.setup
+				procTable.setup = function(self, path, redirect, ...)
+					local pre, post = self.pre, self.post
+					self.pre = function(self, ...)
 						pre(self, ...)
 						io.input(program.input)
 						io.output(program.output)
 					end
-					proc.post = function(self, ...)
+					self.post = function(self, ...)
 						io.output(nil)
 						io.input(nil)
+						if parent.windows then
+							for _, win in ipairs(parent.windows) do
+								win:draw()
+							end
+						end
 						if coroutine.status(self.thread) == "dead" then
-							running = running - 1
-							local passback = {...}
-							if position == 1 then parent:queue("lsh_finish", passback[1]) end
 							program.input:close()
 							program.output:close()
+							running = running - 1
+							local passback = {...}
+							if running == 0 then parent:queue("lsh_finish", unpack(passback[1])) end
 						end
 						post(self, ...)
 					end
-				else
-					running = running - 1
-					program.input:close()
-					program.output:close()
+					oldSetup(self, path, redirect, ...)
 				end
+
+				local proc = process.new(function() return os.run(env, program.program, unpack(program.arguments)) end, program.program, term.current())
+				procTable.setup = oldSetup
+				processes[j] = proc.id
 			end
 
 			while true do
-				local event = {os.pullEvent()}
+				local event = {os.pullEventRaw()}
 				if input_events[event[1]] then
 					for j = 1, #processes do
-						if coroutine.status(processes[j].thread) ~= "dead" then
-							processes[j]:resume(event)
+						if process.list[processes[j]] then
+							process.list[processes[j]]:resume(event)
 						end
 					end
 				elseif event[1] == "lsh_finish" then
+					result = event[2]
+					parent.kill = oldKill
 					break
 				end
 			end
-			result = event[2]
 		end
 
 		if oldCaption then
