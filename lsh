@@ -311,7 +311,7 @@ function shell.run(...)
 	if LyqydOS and process then
 		local parent = process.this()
 		local oldCaption
-		local win = process.getWindow()
+		local win = process.getWindow and process.getWindow()
 		if win and win.setCaption then
 			oldCaption = win.caption
 			win:setCaption(fs.getName(programs[1][1].program))
@@ -649,6 +649,23 @@ function shell.aliases()
 		copy[path] = alias
 	end
 	return copy
+end
+
+if multishell then
+	function shell.openTab(...)
+		local command, args = string.match(table.concat({...}, " "), "^(%S+)%s?(.*)")
+		if #args < 1 then args = nil end
+		local path = shell.resolveProgram(command)
+		if path then
+			return multishell.launch(env, path, args)
+		else
+			error("No such program", 2)
+		end
+	end
+
+	function shell.switchTab(n)
+		multishell.setFocus(n)
+	end
 end
 
 local function saveHistory()
