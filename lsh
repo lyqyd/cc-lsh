@@ -45,6 +45,8 @@ local tCompletionInfo = (parentShell and parentShell.getCompletionInfo and paren
 local programTable, currentProgram = {shell and shell.getRunningProgram() or "lsh"}, 1
 local pipedPrograms = nil
 
+local ioMeta = getmetatable(io.stderr)
+
 local shell = {}
 local env = {
 	shell = shell,
@@ -90,6 +92,11 @@ local stdout = {
 	flush = function(self) end,
 }
 
+if ioMeta then
+	stdin = setmetatable({_handle = stdin}, ioMeta)
+	stdout = setmetatable({_handle = stdout}, ioMeta)
+end
+
 local function newPipe(progs, num)
 	local pipe = {
 		bFileHandle = true,
@@ -128,6 +135,7 @@ local function newPipe(progs, num)
 		close = function(self) end,
 		flush = function(self) end,
 	}
+	if ioMeta then pipe = setmetatable({_handle = pipe}, ioMeta) end
 	progs[num].output = pipe
 	return pipe
 end
