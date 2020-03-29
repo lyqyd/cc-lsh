@@ -22,6 +22,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 --]]
 
+local unpack = unpack or table.unpack
+
 local args = {...}
 
 local runHistory = {}
@@ -65,36 +67,44 @@ local input_events = {
 	terminate = true,
 }
 
-local stdin = {
-	bFileHandle = false,
-	bClosed = false,
-	close = function(self) end,
-	read = function(self, format)
-		if format and format ~= "*l" then
-			error("Unsupported format")
-		end
-		return _G.read()
-	end,
-	lines = function(self)
-		return function()
+local stdin, stdout
+
+if io.stdin then
+	stdin = io.stdin
+else
+	stdin = {
+		bFileHandle = false,
+		bClosed = false,
+		close = function(self) end,
+		read = function(self, format)
+			if format and format ~= "*l" then
+				error("Unsupported format")
+			end
 			return _G.read()
-		end
-	end,
-}
+		end,
+		lines = function(self)
+			return function()
+				return _G.read()
+			end
+		end,
+	}
+	if ioMeta then stdin = setmetatable({_handle = stdin}, ioMeta) end
+end
 
-local stdout = {
-	bFileHandle = false,
-	bClosed = false,
-	close = function(self) end,
-	write = function(self, text)
-		_G.write(text)
-	end,
-	flush = function(self) end,
-}
-
-if ioMeta then
-	stdin = setmetatable({_handle = stdin}, ioMeta)
-	stdout = setmetatable({_handle = stdout}, ioMeta)
+if io.stdout then
+	stdout = io.stdout
+else
+	local stdout = {
+		bFileHandle = false,
+		bClosed = false,
+		close = function(self) end,
+		write = function(self, ...)
+			_G.write(...)
+			return self
+		end,
+		flush = function(self) end,
+	}
+	if ioMeta then stdout = setmetatable({_handle = stdout}, ioMeta) end
 end
 
 local function newPipe(progs, num)
@@ -271,8 +281,6 @@ local function resumePiped(program, event)
 	io.input(program.input)
 	io.output(program.output)
 	local passback = {coroutine.resume(program.thread, unpack(event))}
-	io.output(nil)
-	io.input(nil)
 	if coroutine.status(program.thread) == "dead" then
 		program.thread = false
 		program.input:close()
@@ -357,8 +365,6 @@ function shell.run(...)
 						io.output(program.output)
 					end
 					self.post = function(self, ...)
-						io.output(nil)
-						io.input(nil)
 						if parent.windows then
 							for _, win in ipairs(parent.windows) do
 								win:draw()
