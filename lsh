@@ -414,19 +414,6 @@ function shell.run(...)
 				break
 			end
 
-			if LyqydOS and process then
-				win = process.getWindow and process.getWindow()
-				if win and win.setCaption then
-					oldCaption = win.caption
-					win:setCaption(fs.getName(programs[i][1].program))
-				end
-				local proc = process.this()
-				oldPath = proc.path
-				oldName = proc.name
-				proc.path = programs[i][1].program
-				proc.name = fs.getName(programs[i][1].program)
-			end
-
 			result = true
 			pipedPrograms = programs
 
@@ -459,15 +446,6 @@ function shell.run(...)
 						end
 					end
 				end
-			end
-
-			if win and oldCaption then
-				win:setCaption(oldCaption)
-			end
-			if LyqydOS and process then
-				local proc = process.this()
-				proc.path = oldPath
-				proc.name = oldName
 			end
 		end
 	end
